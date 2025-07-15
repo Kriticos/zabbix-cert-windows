@@ -1,0 +1,126 @@
+zabbix_export:
+  version: '7.2'
+  template_groups:
+    - uuid: 5a2f9298501c4ef1aa4179895921da37
+      name: BSKP
+  templates:
+    - uuid: ce8ba57a7470459ba5a420348fd5bd38
+      template: 'BSKP - Certificados - Windows'
+      name: 'BSKP - Certificados - Windows'
+      description: |
+        zabbix_agent2.conf
+        
+        # descoberta de certificados
+        UserParameter=cert.discovery,powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Zabbix\Certificados\discover-certs.ps1"
+        UserParameter=cert.expira[*],powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\Zabbix\Certificados\check_cert_expiry.ps1" -thumb "$1"
+        
+        
+        # Scripts
+        ```discovery-cert.ps1
+        
+        $certs = Get-ChildItem -Path Cert:\LocalMachine\My
+        $result = @()
+        foreach ($cert in $certs) {
+            # Extrai o CN do certificado
+            $cn = $cert.Subject -replace '.*CN=([^,]+).*', '$1'
+            
+            # Se o subject contém "CN=" seguido por texto que inclui ", OU", extraia apenas até o ", OU"
+            if ($cert.Subject -match 'CN=(.*?)(, OU=|$)') {
+                $cn = $matches[1]
+            }
+            
+            # Remove qualquer barra invertida no início da string
+            $cn = $cn.TrimStart('\')
+            
+            # Remove aspas duplas ou caracteres de escape
+            $cn = $cn -replace '"', '' -replace '\\', ''
+            
+            # Verifica se a data de expiração do certificado é no futuro
+            if ($cert.NotAfter -gt (Get-Date)) {
+                # Adiciona o certificado ativo à lista de resultados
+                $result += @{ "{#CERTCN}" = $cn }
+            }
+        }
+        # Converte os resultados para o formato JSON
+        $json = @{ data = $result } | ConvertTo-Json -Depth 3
+        Write-Output $json
+        
+        ```fim
+        
+        ```check_cert_expiry.ps1
+        
+        param(
+            [string]$cn
+        )
+        
+        # Limpa o CN para evitar problemas com aspas e escapes
+        $cn = $cn.Replace('\"', '').Replace('"', '')
+        
+        # Obtém todos os certificados
+        $allCerts = Get-ChildItem -Path Cert:\LocalMachine\My
+        
+        # Tenta encontrar o certificado de várias maneiras
+        $cert = $null
+        
+        # Primeiro, tenta uma correspondência exata
+        $cert = $allCerts | Where-Object { 
+            ($_.Subject -replace '.*CN=([^,]+(,[^,]+)*?)($|, \w+=.*)', '$1') -eq $cn
+        } | Select-Object -First 1
+        
+        # Se não encontrar, tenta com -like
+        if (-not $cert) {
+            $cert = $allCerts | Where-Object { 
+                ($_.Subject -replace '.*CN=([^,]+(,[^,]+)*?)($|, \w+=.*)', '$1') -like "*$cn*"
+            } | Select-Object -First 1
+        }
+        
+        # Se ainda não encontrar, tenta uma abordagem mais flexível
+        if (-not $cert) {
+            $escapedCn = [regex]::Escape($cn)
+            $cert = $allCerts | Where-Object { 
+                $_.Subject -match "CN=$escapedCn(,|$)"
+            } | Select-Object -First 1
+        }
+        
+        # Se o certificado existir, calcula os dias restantes
+        if ($cert -and $cert.NotAfter) {
+            $dias = ($cert.NotAfter - (Get-Date)).Days
+            if ($dias -ge 0) {
+                Write-Output $dias
+            } else {
+                Write-Output "0"  # Ou outro valor para indicar expirado
+            }
+        } else {
+            Write-Output "-1"  # Valor para indicar que o certificado não foi encontrado
+        }
+        
+        ```fim
+      groups:
+        - name: BSKP
+      discovery_rules:
+        - uuid: 39fb5ac133974b069f855ddf557d9162
+          name: 'Certificado - LLD'
+          key: cert.discovery
+          delay: 6h
+          item_prototypes:
+            - uuid: 4e0f17aaf4c64561b81223ef85c3d01e
+              name: 'Certificado expirando - {#CERTCN}'
+              key: 'cert.expira[{#THUMBPRINT}]'
+              delay: 6h
+              history: 7d
+              units: 'dias restantes'
+              tags:
+                - tag: Certificados
+                  value: Windows
+              trigger_prototypes:
+                - uuid: 5faf2e985f8d428aae8e4177dbcbbdd5
+                  expression: 'last(/BSKP - Certificados - Windows/cert.expira[{#THUMBPRINT}])<15'
+                  name: '⚠️ Certificado {#CERTCN} vencendo em menos de 15 dias'
+                  priority: HIGH
+                  manual_close: 'YES'
+                  tags:
+                    - tag: Certificados
+                      value: Windows
+      tags:
+        - tag: Certificados
+          value: Windows
