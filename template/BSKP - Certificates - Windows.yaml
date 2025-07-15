@@ -95,6 +95,9 @@ zabbix_export:
         }
         
         ```fim
+      vendor:
+        name: Kriticos
+        version: 1.0-1
       groups:
         - name: BSKP
       discovery_rules:
